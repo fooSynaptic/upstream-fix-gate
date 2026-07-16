@@ -29,7 +29,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="upstream-fix-gate",
         description=(
             "Hard gate before OSS contributions: check whether an upstream issue "
-            "already looks fixed in releases / changelog / default branch."
+            "already looks fixed in releases / changelog / default branch, or already "
+            "has an open PR claiming it."
         ),
     )
     p.add_argument("--repo", help="Upstream repo as OWNER/NAME")
@@ -59,6 +60,7 @@ def main(argv: list[str] | None = None) -> int:
                     "repo": result.repo,
                     "issue": result.issue,
                     "decision": result.decision,
+                    "confidence": result.confidence,
                     "reasons": result.reasons,
                     "details": result.details,
                 },

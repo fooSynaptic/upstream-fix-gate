@@ -30,7 +30,10 @@ def _run_gh(args: list[str]) -> str:
 
 
 def _gh_json(args: list[str]) -> Any:
-    return json.loads(_run_gh(args))
+    out = _run_gh(args)
+    if not out.strip():
+        return None
+    return json.loads(out)
 
 
 @dataclass
@@ -38,18 +41,27 @@ class CheckResult:
     repo: str
     issue: int
     decision: str  # GO | STOP
+    confidence: str = "LOW"  # HIGH | MEDIUM | LOW
     reasons: list[str] = field(default_factory=list)
     details: dict[str, Any] = field(default_factory=dict)
 
     def to_text(self) -> str:
         lines = [
-            f"repo:     {self.repo}",
-            f"issue:    #{self.issue}",
-            f"decision: {self.decision}",
+            f"repo:       {self.repo}",
+            f"issue:      #{self.issue}",
+            f"decision:   {self.decision}",
+            f"confidence: {self.confidence}",
             "reasons:",
         ]
         for reason in self.reasons:
             lines.append(f"  - {reason}")
+        open_prs = self.details.get("open_prs") or []
+        if open_prs:
+            lines.append("open_prs:")
+            for pr in open_prs:
+                lines.append(
+                    f"  - #{pr.get('number')} {pr.get('title')} ({pr.get('url')})"
+                )
         return "\n".join(lines) + "\n"
 
 
@@ -63,14 +75,19 @@ def _issue_mentions_fix(body: str, comments: list[dict]) -> bool:
     )
 
 
+def _normalize_comments(comments: Any) -> list[dict]:
+    if not comments:
+        return []
+    if isinstance(comments, list) and comments and isinstance(comments[0], str):
+        return [{"body": c} for c in comments]
+    if isinstance(comments, list):
+        return [c for c in comments if isinstance(c, dict)]
+    return []
+
+
 def _changelog_hits(repo: str, issue: int) -> list[str]:
     hits: list[str] = []
     for path in ("CHANGELOG.md", "CHANGES.md", "HISTORY.md", "docs/CHANGELOG.md"):
-        try:
-            content = _run_gh(["api", f"repos/{repo}/contents/{path}", "--jq", ".content"])
-        except GhError:
-            continue
-        # content is raw base64 from API unless we decode; prefer raw via -H Accept
         try:
             raw = _run_gh(
                 [
@@ -94,7 +111,7 @@ def _release_notes_hits(repo: str, issue: int, limit: int = 8) -> list[str]:
                 "api",
                 f"repos/{repo}/releases?per_page={limit}",
                 "--jq",
-                "[.[] | {tag: .tag_name, body: (.body // \"\")}]",
+                '[.[] | {tag: .tag_name, body: (.body // "")}]',
             ]
         )
     except GhError:
@@ -109,29 +126,7 @@ def _release_notes_hits(repo: str, issue: int, limit: int = 8) -> list[str]:
 
 
 def _default_branch_grep(repo: str, issue: int) -> bool:
-    """Best-effort: search code for issue number on default branch."""
-    try:
-        result = _gh_json(
-            [
-                "search",
-                "code",
-                "--repo",
-                repo,
-                str(issue),
-                "--json",
-                "path",
-                "--limit",
-                "5",
-            ]
-        )
-        # newer gh: `gh search code` may return list
-        if isinstance(result, list) and result:
-            return True
-        if isinstance(result, dict) and result.get("items"):
-            return True
-    except GhError:
-        pass
-    # Fallback: commit messages mentioning the issue
+    """Best-effort: search commits for the issue number on the repo."""
     try:
         out = _run_gh(
             [
@@ -144,6 +139,57 @@ def _default_branch_grep(repo: str, issue: int) -> bool:
         return int(out.strip() or "0") > 0
     except (GhError, ValueError):
         return False
+
+
+def _open_prs_for_issue(repo: str, issue: int) -> list[dict[str, Any]]:
+    """Find open PRs that reference this issue (title/body/closing keywords)."""
+    query = f"repo:{repo} is:pr is:open ({issue} OR #{issue})"
+    try:
+        items = _gh_json(
+            [
+                "search",
+                "prs",
+                query,
+                "--json",
+                "number,title,url,body",
+                "--limit",
+                "20",
+            ]
+        )
+    except GhError:
+        return []
+
+    if not isinstance(items, list):
+        return []
+
+    pattern = re.compile(
+        rf"(?i)(?:\b(?:fix(?:es|ed)?|close[sd]?|resolve[sd]?)\s+)?#{issue}\b|"
+        rf"issues/{issue}\b|"
+        rf"(?<!\d){issue}(?!\d)"
+    )
+    matched: list[dict[str, Any]] = []
+    for item in items:
+        title = item.get("title") or ""
+        body = item.get("body") or ""
+        if pattern.search(title) or pattern.search(body):
+            matched.append(
+                {
+                    "number": item.get("number"),
+                    "title": title,
+                    "url": item.get("url"),
+                }
+            )
+    return matched
+
+
+def _confidence(stop_signals: int, state: str, has_shipped: bool, has_open_pr: bool) -> str:
+    if state == "CLOSED" and has_shipped:
+        return "HIGH"
+    if has_shipped or (has_open_pr and stop_signals >= 2):
+        return "HIGH"
+    if stop_signals >= 2 or has_open_pr or state == "CLOSED":
+        return "MEDIUM"
+    return "LOW"
 
 
 def evaluate(repo: str, issue: int) -> CheckResult:
@@ -166,61 +212,87 @@ def evaluate(repo: str, issue: int) -> CheckResult:
     details["issue_state"] = state
     details["title"] = issue_data.get("title")
 
-    comments = issue_data.get("comments") or []
-    # gh returns comments as list of objects or sometimes need separate fetch
-    if comments and isinstance(comments[0], str):
-        comments = [{"body": c} for c in comments]
+    comments = _normalize_comments(issue_data.get("comments"))
 
     stop_signals = 0
+    has_shipped = False
 
     if state == "CLOSED":
         reasons.append(f"Upstream issue #{issue} is CLOSED")
         if _issue_mentions_fix(issue_data.get("body") or "", comments):
             reasons.append("Close discussion / body mentions a fix or release")
-            stop_signals += 1
         else:
-            reasons.append("Closed — verify whether closed as fixed vs not-planned before contributing")
-            stop_signals += 1
+            reasons.append(
+                "Closed — verify whether closed as fixed vs not-planned before contributing"
+            )
+        stop_signals += 1
 
     changelog = _changelog_hits(repo, issue)
     if changelog:
         reasons.append(f"Changelog mentions #{issue}: {', '.join(changelog)}")
         details["changelog"] = changelog
         stop_signals += 1
+        has_shipped = True
 
     releases = _release_notes_hits(repo, issue)
     if releases:
         reasons.append(f"Release notes mention #{issue}: {', '.join(releases)}")
         details["releases"] = releases
         stop_signals += 1
+        has_shipped = True
 
     if _default_branch_grep(repo, issue):
-        reasons.append("Default-branch code/commits mention this issue number (possible landed fix)")
+        reasons.append(
+            "Default-branch commits mention this issue number (possible landed fix)"
+        )
         details["branch_mention"] = True
+        stop_signals += 1
+
+    open_prs = _open_prs_for_issue(repo, issue)
+    if open_prs:
+        details["open_prs"] = open_prs
+        pr_refs = ", ".join(f"#{p['number']}" for p in open_prs)
+        reasons.append(
+            f"Open PR(s) already reference #{issue}: {pr_refs} — avoid duplicate work"
+        )
         stop_signals += 1
 
     if stop_signals >= 1 and state == "CLOSED":
         decision = "STOP"
-    elif stop_signals >= 2:
+    elif has_shipped:
         decision = "STOP"
-    elif stop_signals == 1 and (changelog or releases):
+    elif open_prs and stop_signals >= 1:
+        # Open PR alone is enough to STOP: the lane is already taken.
+        decision = "STOP"
+    elif stop_signals >= 2:
         decision = "STOP"
     else:
         decision = "GO"
         if not reasons:
-            reasons.append("Issue still OPEN and no changelog/release/default-branch hit found")
+            reasons.append(
+                "Issue still OPEN; no changelog/release/open-PR/default-branch hit found"
+            )
         else:
-            reasons.append("Signals present but not enough to auto-STOP — manually confirm before opening work")
+            reasons.append(
+                "Signals present but not enough to auto-STOP — manually confirm before opening work"
+            )
+
+    confidence = _confidence(stop_signals, state or "", has_shipped, bool(open_prs))
 
     if decision == "STOP":
-        reasons.append("Do not fork / open a duplicate contribution; update your plan status only")
+        reasons.append(
+            "Do not fork / open a duplicate contribution; update your plan status only"
+        )
     else:
-        reasons.append("Contribution may still be valuable if no equivalent fix exists on default branch")
+        reasons.append(
+            "Contribution may still be valuable if no equivalent fix exists on default branch"
+        )
 
     return CheckResult(
         repo=repo,
         issue=issue,
         decision=decision,
+        confidence=confidence,
         reasons=reasons,
         details=details,
     )
