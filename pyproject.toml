@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "upstream-fix-gate"
-version = "0.2.1"
+version = "0.2.2"
 description = "Decide GO/STOP before contributing: has upstream already shipped a fix for this issue?"
 readme = "README.md"
 license = { text = "MIT" }

@@ -33,7 +33,7 @@ Permissions needed (classic PAT scopes if you use a token with `gh`): at least *
 ### Users — no clone (pinned release)
 
 ```bash
-pip install https://github.com/fooSynaptic/upstream-fix-gate/archive/refs/tags/v0.2.1.tar.gz
+pip install https://github.com/fooSynaptic/upstream-fix-gate/archive/refs/tags/v0.2.2.tar.gz
 ```
 
 ### Users — no clone (track `main`)
@@ -49,17 +49,8 @@ pip install git+https://github.com/fooSynaptic/upstream-fix-gate.git
 ```bash
 pipx install git+https://github.com/fooSynaptic/upstream-fix-gate.git
 # or pinned:
-# pipx install https://github.com/fooSynaptic/upstream-fix-gate/archive/refs/tags/v0.2.1.tar.gz
+# pipx install https://github.com/fooSynaptic/upstream-fix-gate/archive/refs/tags/v0.2.2.tar.gz
 ```
-
-### Users — PyPI (planned)
-
-```bash
-# After first publish to PyPI:
-pip install upstream-fix-gate
-```
-
-> Package name on PyPI will be **`upstream-fix-gate`** (same as this repo). Until publish, use the GitHub archive / `git+https` lines above.
 
 ### Developers
 
@@ -76,7 +67,6 @@ ufg --help
 | `pip install -e .` | Yes | Contributors | Yes |
 | Release `.tar.gz` | No | Users (stable) | No |
 | `git+https://…` | No | Users (latest) | No |
-| `pip install upstream-fix-gate` | No | Users (after PyPI) | No |
 
 ---
 
@@ -202,7 +192,7 @@ jobs:
 
 A copy-paste sample also lives in [`examples/github-actions-usage.yml`](examples/github-actions-usage.yml).
 
-Ready-to-enable CI / PyPI publish workflows (copy into `.github/workflows/`): [`examples/workflows/ci.yml`](examples/workflows/ci.yml), [`examples/workflows/publish.yml`](examples/workflows/publish.yml).
+Ready-to-enable CI workflow (copy into `.github/workflows/`): [`examples/workflows/ci.yml`](examples/workflows/ci.yml).
 
 ---
 
