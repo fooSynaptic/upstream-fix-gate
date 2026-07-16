@@ -1,0 +1,30 @@
+# Example: gate before contributing
+
+Copy into a consumer repo as `.github/workflows/pre-contribute-gate.yml`
+(or invoke manually via `workflow_dispatch`).
+
+```yaml
+name: upstream-fix-gate
+on:
+  workflow_dispatch:
+    inputs:
+      issue_url:
+        description: GitHub issue URL
+        required: true
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install upstream-fix-gate
+        run: pip install git+https://github.com/fooSynaptic/upstream-fix-gate.git
+      - name: Run gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ufg --url "${{ inputs.issue_url }}"
+```
+
+Exit code `1` fails the job on **STOP** (duplicate / already fixed). Exit code `0` is **GO**.
