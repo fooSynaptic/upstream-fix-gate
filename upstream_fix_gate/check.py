@@ -6,6 +6,7 @@ import json
 import re
 import subprocess
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 
@@ -64,6 +65,16 @@ class CheckResult:
                 )
         return "\n".join(lines) + "\n"
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "repo": self.repo,
+            "issue": self.issue,
+            "decision": self.decision,
+            "confidence": self.confidence,
+            "reasons": self.reasons,
+            "details": self.details,
+        }
+
 
 def _issue_mentions_fix(body: str, comments: list[dict]) -> bool:
     blob = (body or "") + "\n" + "\n".join(c.get("body") or "" for c in comments)
@@ -73,6 +84,23 @@ def _issue_mentions_fix(body: str, comments: list[dict]) -> bool:
             blob,
         )
     )
+
+
+_NOT_PLANNED_RE = re.compile(
+    r"(?i)\b("
+    r"not[- ]planned|wontfix|won't\s+fix|will\s+not\s+fix|"
+    r"duplicate|out[- ]of[- ]scope|no[- ]fix|declined|rejected|"
+    r"works\s+as\s+(?:designed|intended)|by\s+design|"
+    r"closing\s+as\s+(?:not[- ]planned|duplicate|wontfix)"
+    r")\b"
+)
+
+
+def _issue_looks_not_planned(body: str, comments: list[dict], title: str = "") -> bool:
+    blob = (title or "") + "\n" + (body or "") + "\n" + "\n".join(
+        c.get("body") or "" for c in comments
+    )
+    return bool(_NOT_PLANNED_RE.search(blob))
 
 
 def _normalize_comments(comments: Any) -> list[dict]:
@@ -85,8 +113,19 @@ def _normalize_comments(comments: Any) -> list[dict]:
     return []
 
 
+def _issue_ref_pattern(issue: int) -> re.Pattern[str]:
+    """Match explicit issue references — not bare numbers (false-positive prone)."""
+    return re.compile(
+        rf"(?i)"
+        rf"(?:#\s*{issue}\b|"
+        rf"issues/{issue}\b|"
+        rf"\b(?:fix(?:es|ed)?|close[sd]?|resolve[sd]?)\s+#?\s*{issue}\b)"
+    )
+
+
 def _changelog_hits(repo: str, issue: int) -> list[str]:
     hits: list[str] = []
+    pattern = _issue_ref_pattern(issue)
     for path in ("CHANGELOG.md", "CHANGES.md", "HISTORY.md", "docs/CHANGELOG.md"):
         try:
             raw = _run_gh(
@@ -99,7 +138,7 @@ def _changelog_hits(repo: str, issue: int) -> list[str]:
             )
         except GhError:
             continue
-        if re.search(rf"#\s*{issue}\b|issues/{issue}\b", raw):
+        if pattern.search(raw):
             hits.append(path)
     return hits
 
@@ -117,7 +156,7 @@ def _release_notes_hits(repo: str, issue: int, limit: int = 8) -> list[str]:
     except GhError:
         return []
     hits = []
-    pattern = re.compile(rf"#\s*{issue}\b|issues/{issue}\b")
+    pattern = _issue_ref_pattern(issue)
     for rel in releases or []:
         body = rel.get("body") or ""
         if pattern.search(body):
@@ -126,12 +165,14 @@ def _release_notes_hits(repo: str, issue: int, limit: int = 8) -> list[str]:
 
 
 def _default_branch_grep(repo: str, issue: int) -> bool:
-    """Best-effort: search commits for the issue number on the repo."""
+    """Search commits for explicit issue refs (#N / issues/N / Fixes N), not bare N."""
+    # GitHub commit search: quote the hash form so "123" alone does not match.
+    query = f'repo:{repo} ("#{issue}" OR "issues/{issue}" OR "Fixes #{issue}" OR "Fix #{issue}" OR "Closes #{issue}")'
     try:
         out = _run_gh(
             [
                 "api",
-                f"search/commits?q=repo:{repo}+{issue}",
+                f"search/commits?q={query}",
                 "--jq",
                 ".total_count",
             ]
@@ -143,7 +184,7 @@ def _default_branch_grep(repo: str, issue: int) -> bool:
 
 def _open_prs_for_issue(repo: str, issue: int) -> list[dict[str, Any]]:
     """Find open PRs that reference this issue (title/body/closing keywords)."""
-    query = f"repo:{repo} is:pr is:open ({issue} OR #{issue})"
+    query = f"repo:{repo} is:pr is:open (#{issue} OR issues/{issue})"
     try:
         items = _gh_json(
             [
@@ -162,11 +203,7 @@ def _open_prs_for_issue(repo: str, issue: int) -> list[dict[str, Any]]:
     if not isinstance(items, list):
         return []
 
-    pattern = re.compile(
-        rf"(?i)(?:\b(?:fix(?:es|ed)?|close[sd]?|resolve[sd]?)\s+)?#{issue}\b|"
-        rf"issues/{issue}\b|"
-        rf"(?<!\d){issue}(?!\d)"
-    )
+    pattern = _issue_ref_pattern(issue)
     matched: list[dict[str, Any]] = []
     for item in items:
         title = item.get("title") or ""
@@ -182,7 +219,15 @@ def _open_prs_for_issue(repo: str, issue: int) -> list[dict[str, Any]]:
     return matched
 
 
-def _confidence(stop_signals: int, state: str, has_shipped: bool, has_open_pr: bool) -> str:
+def _confidence(
+    stop_signals: int,
+    state: str,
+    has_shipped: bool,
+    has_open_pr: bool,
+    not_planned: bool = False,
+) -> str:
+    if not_planned and state == "CLOSED":
+        return "HIGH"
     if state == "CLOSED" and has_shipped:
         return "HIGH"
     if has_shipped or (has_open_pr and stop_signals >= 2):
@@ -209,23 +254,39 @@ def evaluate(repo: str, issue: int) -> CheckResult:
         ]
     )
     state = issue_data.get("state")
+    title = issue_data.get("title") or ""
     details["issue_state"] = state
-    details["title"] = issue_data.get("title")
+    details["title"] = title
 
     comments = _normalize_comments(issue_data.get("comments"))
+    body = issue_data.get("body") or ""
 
     stop_signals = 0
     has_shipped = False
+    not_planned = False
 
     if state == "CLOSED":
         reasons.append(f"Upstream issue #{issue} is CLOSED")
-        if _issue_mentions_fix(issue_data.get("body") or "", comments):
+        not_planned = _issue_looks_not_planned(body, comments, title)
+        fixed_ish = _issue_mentions_fix(body, comments)
+        details["closed_as"] = "not_planned" if not_planned and not fixed_ish else (
+            "fixed" if fixed_ish else "unknown"
+        )
+        if not_planned and not fixed_ish:
+            reasons.append(
+                "Close language looks not-planned / duplicate / won't-fix — "
+                "STOP contributing unless scope changed"
+            )
+            stop_signals += 1
+        elif fixed_ish:
             reasons.append("Close discussion / body mentions a fix or release")
+            stop_signals += 1
+            has_shipped = True
         else:
             reasons.append(
                 "Closed — verify whether closed as fixed vs not-planned before contributing"
             )
-        stop_signals += 1
+            stop_signals += 1
 
     changelog = _changelog_hits(repo, issue)
     if changelog:
@@ -243,7 +304,7 @@ def evaluate(repo: str, issue: int) -> CheckResult:
 
     if _default_branch_grep(repo, issue):
         reasons.append(
-            "Default-branch commits mention this issue number (possible landed fix)"
+            "Default-branch commits mention this issue (#N / Fixes / issues/N)"
         )
         details["branch_mention"] = True
         stop_signals += 1
@@ -262,7 +323,6 @@ def evaluate(repo: str, issue: int) -> CheckResult:
     elif has_shipped:
         decision = "STOP"
     elif open_prs and stop_signals >= 1:
-        # Open PR alone is enough to STOP: the lane is already taken.
         decision = "STOP"
     elif stop_signals >= 2:
         decision = "STOP"
@@ -277,7 +337,9 @@ def evaluate(repo: str, issue: int) -> CheckResult:
                 "Signals present but not enough to auto-STOP — manually confirm before opening work"
             )
 
-    confidence = _confidence(stop_signals, state or "", has_shipped, bool(open_prs))
+    confidence = _confidence(
+        stop_signals, state or "", has_shipped, bool(open_prs), not_planned
+    )
 
     if decision == "STOP":
         reasons.append(
@@ -296,3 +358,62 @@ def evaluate(repo: str, issue: int) -> CheckResult:
         reasons=reasons,
         details=details,
     )
+
+
+_BATCH_URL_RE = re.compile(
+    r"^\s*https?://github\.com/([^/\s]+/[^/\s]+)/issues/(\d+)/?\s*(?:#.*)?$"
+)
+_BATCH_HASH_RE = re.compile(
+    r"^\s*([^/\s]+/[^/\s]+)#(\d+)\s*(?:#.*)?$"
+)
+_BATCH_PATH_RE = re.compile(
+    r"^\s*([^/\s]+/[^/\s]+)/issues/(\d+)/?\s*(?:#.*)?$"
+)
+
+
+def parse_batch_line(line: str) -> tuple[str, int] | None:
+    """Parse one batch line: URL, OWNER/REPO#N, or OWNER/REPO/issues/N. Blank/# comments → None."""
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        return None
+    for pattern in (_BATCH_URL_RE, _BATCH_HASH_RE, _BATCH_PATH_RE):
+        m = pattern.match(stripped)
+        if m:
+            return m.group(1), int(m.group(2))
+    raise ValueError(f"Unrecognized batch line: {line.rstrip()!r}")
+
+
+def load_batch_targets(path: Path) -> list[tuple[str, int]]:
+    text = path.read_text(encoding="utf-8")
+    targets: list[tuple[str, int]] = []
+    seen: set[tuple[str, int]] = set()
+    for line in text.splitlines():
+        parsed = parse_batch_line(line)
+        if parsed is None:
+            continue
+        if parsed in seen:
+            continue
+        seen.add(parsed)
+        targets.append(parsed)
+    if not targets:
+        raise ValueError(f"No issue targets found in {path}")
+    return targets
+
+
+def evaluate_batch(targets: list[tuple[str, int]]) -> list[CheckResult]:
+    return [evaluate(repo, issue) for repo, issue in targets]
+
+
+def format_batch_summary(results: list[CheckResult]) -> str:
+    go_n = sum(1 for r in results if r.decision == "GO")
+    stop_n = sum(1 for r in results if r.decision == "STOP")
+    lines = [
+        f"batch: {len(results)} issue(s) — GO={go_n} STOP={stop_n}",
+        "",
+        f"{'decision':<8} {'conf':<6} {'target'}",
+        f"{'-' * 8} {'-' * 6} {'-' * 40}",
+    ]
+    for r in results:
+        target = f"{r.repo}#{r.issue}"
+        lines.append(f"{r.decision:<8} {r.confidence:<6} {target}")
+    return "\n".join(lines) + "\n"

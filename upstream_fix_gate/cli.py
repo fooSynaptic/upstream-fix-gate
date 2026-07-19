@@ -6,8 +6,15 @@ import argparse
 import json
 import re
 import sys
+from pathlib import Path
 
-from upstream_fix_gate.check import GhError, evaluate
+from upstream_fix_gate.check import (
+    GhError,
+    evaluate,
+    evaluate_batch,
+    format_batch_summary,
+    load_batch_targets,
+)
 
 
 def _parse_target(repo: str | None, issue: str | None, url: str | None) -> tuple[str, int]:
@@ -37,6 +44,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--issue", help="Issue number")
     p.add_argument("--url", help="Full GitHub issue URL")
     p.add_argument(
+        "--batch",
+        metavar="FILE",
+        help=(
+            "Batch mode: file with one target per line "
+            "(URL, OWNER/REPO#N, or OWNER/REPO/issues/N). "
+            "Lines starting with # are comments."
+        ),
+    )
+    p.add_argument(
         "--json",
         action="store_true",
         help="Emit machine-readable JSON",
@@ -46,32 +62,55 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+
     try:
-        repo, issue = _parse_target(args.repo, args.issue, args.url)
-        result = evaluate(repo, issue)
+        if args.batch:
+            if args.repo or args.issue or args.url:
+                print(
+                    "error: --batch cannot be combined with --repo/--issue/--url",
+                    file=sys.stderr,
+                )
+                return 2
+            path = Path(args.batch)
+            if not path.is_file():
+                print(f"error: batch file not found: {path}", file=sys.stderr)
+                return 2
+            try:
+                targets = load_batch_targets(path)
+            except ValueError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
+            results = evaluate_batch(targets)
+        else:
+            repo, issue = _parse_target(args.repo, args.issue, args.url)
+            results = [evaluate(repo, issue)]
     except GhError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
     if args.json:
-        print(
-            json.dumps(
-                {
-                    "repo": result.repo,
-                    "issue": result.issue,
-                    "decision": result.decision,
-                    "confidence": result.confidence,
-                    "reasons": result.reasons,
-                    "details": result.details,
-                },
-                ensure_ascii=False,
-                indent=2,
-            )
-        )
+        if args.batch:
+            payload = {
+                "batch": True,
+                "count": len(results),
+                "go": sum(1 for r in results if r.decision == "GO"),
+                "stop": sum(1 for r in results if r.decision == "STOP"),
+                "results": [r.to_dict() for r in results],
+            }
+        else:
+            payload = results[0].to_dict()
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    elif args.batch:
+        for result in results:
+            print(result.to_text())
+            print("---")
+        print(format_batch_summary(results))
     else:
-        print(result.to_text())
+        print(results[0].to_text())
 
-    return 0 if result.decision == "GO" else 1
+    if any(r.decision == "STOP" for r in results):
+        return 1
+    return 0
 
 
 if __name__ == "__main__":

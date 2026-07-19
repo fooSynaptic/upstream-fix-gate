@@ -1,0 +1,8 @@
+# Example batch file for `ufg --batch`
+# One target per line. Supported forms:
+#   https://github.com/OWNER/REPO/issues/123
+#   OWNER/REPO#123
+#   OWNER/REPO/issues/123
+
+# https://github.com/VectifyAI/PageIndex/issues/326
+# OWNER/REPO#42

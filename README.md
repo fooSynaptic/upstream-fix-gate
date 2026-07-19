@@ -33,7 +33,7 @@ Permissions needed (classic PAT scopes if you use a token with `gh`): at least *
 ### Users — no clone (pinned release)
 
 ```bash
-pip install https://github.com/fooSynaptic/upstream-fix-gate/archive/refs/tags/v0.2.2.tar.gz
+pip install https://github.com/fooSynaptic/upstream-fix-gate/archive/refs/tags/v0.3.0.tar.gz
 ```
 
 ### Users — no clone (track `main`)
@@ -49,7 +49,7 @@ pip install git+https://github.com/fooSynaptic/upstream-fix-gate.git
 ```bash
 pipx install git+https://github.com/fooSynaptic/upstream-fix-gate.git
 # or pinned:
-# pipx install https://github.com/fooSynaptic/upstream-fix-gate/archive/refs/tags/v0.2.2.tar.gz
+# pipx install https://github.com/fooSynaptic/upstream-fix-gate/archive/refs/tags/v0.3.0.tar.gz
 ```
 
 ### Developers
@@ -108,12 +108,38 @@ error: `gh` CLI not found. Install GitHub CLI and run `gh auth login`.
 # exit code 2
 ```
 
+### Batch — many issues in one pass
+
+```bash
+# issues.txt (one per line; # starts a comment)
+# https://github.com/OWNER/REPO/issues/123
+# OWNER/REPO#456
+ufg --batch issues.txt
+```
+
+Example summary footer:
+
+```text
+batch: 3 issue(s) — GO=1 STOP=2
+
+decision conf   target
+-------- ------ ----------------------------------------
+STOP     MEDIUM VectifyAI/PageIndex#326
+GO       LOW    OWNER/REPO#42
+STOP     HIGH   acme/tool#7
+```
+
+Exit code is `1` if **any** target is STOP (CI-friendly). Use `--batch issues.txt --json` for a machine-readable list.
+
+Sample file: [`examples/issues.batch.txt`](examples/issues.batch.txt).
+
 ---
 
 ## CLI reference
 
 ```text
-usage: upstream-fix-gate [-h] [--repo REPO] [--issue ISSUE] [--url URL] [--json]
+usage: upstream-fix-gate [-h] [--repo REPO] [--issue ISSUE] [--url URL]
+                          [--batch FILE] [--json]
 
 Hard gate before OSS contributions: check whether an upstream issue already
 looks fixed in releases / changelog / default branch, or already has an open
@@ -124,12 +150,13 @@ options:
   --repo REPO    Upstream repo as OWNER/NAME
   --issue ISSUE  Issue number
   --url URL      Full GitHub issue URL
+  --batch FILE   Batch file: one URL or OWNER/REPO#N per line
   --json         Emit machine-readable JSON
 ```
 
 Aliases: `upstream-fix-gate` and `ufg`.
 
-Provide either `--url`, or both `--repo` and `--issue`.
+Provide either `--batch FILE`, or `--url`, or both `--repo` and `--issue`.
 
 ### JSON output
 
@@ -145,14 +172,15 @@ Fields: `decision`, `confidence`, `reasons`, `details` (may include `open_prs`, 
 
 | Signal | Effect |
 |--------|--------|
-| Issue `CLOSED` (+ fix-ish language) | STOP lean |
+| Issue `CLOSED` + fix-ish language | STOP lean (`closed_as=fixed`) |
+| Issue `CLOSED` + not-planned / duplicate / won't-fix | STOP (`closed_as=not_planned`) |
 | `CHANGELOG.md` / `HISTORY.md` mentions `#N` | STOP |
 | Recent release notes mention `#N` | STOP |
-| Default-branch commits mention `N` | STOP lean |
+| Default-branch commits mention `#N` / `Fixes #N` / `issues/N` | STOP lean |
 | Open PR already references `#N` | STOP |
 | Confidence `HIGH` / `MEDIUM` / `LOW` | Strength of the case |
 
-**Limits:** uses GitHub’s public API via `gh` — subject to [GitHub rate limits](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api). Authenticated `gh` typically gets a higher quota than anonymous calls. This tool does not cache responses yet.
+**Limits:** uses GitHub’s public API via `gh` — subject to [GitHub rate limits](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api). Authenticated `gh` typically gets a higher quota than anonymous calls. Matching requires **explicit** issue refs (`#N`, not a bare number) to cut false positives. This tool does not cache responses yet.
 
 ---
 

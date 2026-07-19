@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.3.0] — 2026-07-19
+
+### Added
+
+- `--batch FILE` — gate many issues at once (URL / `OWNER/REPO#N` / `OWNER/REPO/issues/N` per line)
+- Batch summary table (`GO=` / `STOP=`); exit `1` if any target is STOP
+- CLOSED issues: distinguish **fixed** vs **not-planned / duplicate / won't-fix** (`details.closed_as`)
+
+### Changed
+
+- Commit / changelog / release / open-PR matching now requires **explicit** refs (`#N`, `issues/N`, `Fixes #N`) — bare issue numbers no longer count (fewer false STOP)
+
 ## [0.2.2] — 2026-07-17
 
 ### Removed
